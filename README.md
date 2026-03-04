@@ -6,6 +6,16 @@ This codebase trains a contextual bandit policy on offline data while enforcing 
 
 ---
 
+## Installation
+
+```bash
+conda create -n fair_bandits python=3.10
+conda activate fair_bandits
+pip install -r requirements.txt
+```
+
+---
+
 ## File Structure
 
 ```
