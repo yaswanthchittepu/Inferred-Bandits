@@ -31,6 +31,50 @@ class LinearPolicy:
         return probs[np.arange(len(actions)), actions]  # (B,)
 
 
+def eval_metrics(params, train_X, train_a, train_pi_b, train_r, train_s, train_true_labels,
+                 policy, batch_size, constraint_kwargs):
+    """Full evaluation of params on training data. Returns IS and on-policy metrics."""
+    all_is_rewards, all_is_actions, all_pi_a, all_sensitive, all_pred_actions = [], [], [], [], []
+    for b_sidx in range(0, len(train_X), batch_size):
+        batch_X    = train_X   [b_sidx : b_sidx + batch_size]
+        batch_a    = train_a   [b_sidx : b_sidx + batch_size]
+        batch_pi_b = train_pi_b[b_sidx : b_sidx + batch_size]
+        batch_r    = train_r   [b_sidx : b_sidx + batch_size]
+        batch_s    = train_s   [b_sidx : b_sidx + batch_size]
+        probs = policy.get_probs(batch_X, params)
+        pi_a  = probs[np.arange(len(batch_a)), batch_a]
+        all_is_rewards.append((pi_a / (batch_pi_b + 1e-8)) * batch_r)
+        all_is_actions.append((pi_a / (batch_pi_b + 1e-8)) * batch_a.astype(float))
+        all_pi_a.append(pi_a)
+        all_sensitive.append(batch_s)
+        all_pred_actions.append(probs.argmax(axis=1))
+    is_r_np   = np.concatenate(all_is_rewards)
+    is_a_np   = np.concatenate(all_is_actions)
+    pi_a_np   = np.concatenate(all_pi_a)
+    s_np      = np.concatenate(all_sensitive).ravel().astype(bool)
+    pred_a_np = np.concatenate(all_pred_actions)
+    metric  = is_r_np if constraint_kwargs['disparity_type'] == 'reward' else is_a_np
+    mean_g1 = metric[s_np].mean()
+    mean_g2 = metric[~s_np].mean()
+    is_r_t = torch.tensor(is_r_np, dtype=torch.float32).unsqueeze(1)
+    is_a_t = torch.tensor(is_a_np, dtype=torch.float32).unsqueeze(1)
+    pi_a_t = torch.tensor(pi_a_np, dtype=torch.float32).unsqueeze(1)
+    s_t    = torch.tensor(s_np,    dtype=torch.bool)
+    _, ucb_abs_diff = bound_propagation(is_r_t, is_a_t, pi_a_t, s_t, constraint_kwargs)
+    match        = pred_a_np == train_true_labels
+    rewards_eval = np.where(match, 1.0, -1.0)
+    return {
+        'mean_is_reward':  is_r_np.mean(),
+        'mean_g1':         mean_g1,
+        'mean_g2':         mean_g2,
+        'abs_diff':        abs(mean_g1 - mean_g2),
+        'ucb_abs_diff':    ucb_abs_diff.item(),
+        'on_policy_reward': rewards_eval.mean(),
+        'on_policy_g1':    rewards_eval[s_np].mean()  if s_np.sum()   > 0 else float('nan'),
+        'on_policy_g2':    rewards_eval[~s_np].mean() if (~s_np).sum() > 0 else float('nan'),
+    }
+
+
 def evaluate_solution(params, train_X, train_a, train_pi_b, train_r, train_s,
                       policy, batch_size, constraint_kwargs, epsilon):
     all_is_rewards, all_is_actions, all_pi_a, all_sensitive = [], [], [], []
@@ -76,6 +120,7 @@ if __name__ == "__main__":
     parser.add_argument('--popsize',              type=int,   default=None)
     parser.add_argument('--batch_size',           type=int,   default=None)
     parser.add_argument('--n_jobs',               type=int,   default=None)
+    parser.add_argument('--eval_freq',            type=int,   default=None)
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -98,6 +143,7 @@ if __name__ == "__main__":
     POPSIZE              = cfg.get('popsize', None)
     BATCH_SIZE           = cfg['batch_size']
     N_JOBS               = cfg.get('n_jobs', -1)
+    EVAL_FREQ            = cfg['eval_freq']
     CONSTRAINT_TRUNC     = CONSTRAINT_TYPE.split('-')[0]
     OUTPUT_DIR           = os.path.join(cfg['output_dir'], DATSET_NAME, SENSITIVE_ATTRIBUTE,
                                         CONSTRAINT_TRUNC, BEHAVIOR_POLICY_TYPE, 'cma')
@@ -110,6 +156,25 @@ if __name__ == "__main__":
     assert CONSTRAINT_TYPE in ['students-ttest', 'welchs-ttest']
     assert DISPARITY_TYPE in ['reward', 'action']
 
+    wandb.init(
+        project="group-fair-bandits",
+        name=f"{DATSET_NAME}-{SENSITIVE_ATTRIBUTE}-cma-{CONSTRAINT_TRUNC}-{BEHAVIOR_POLICY_TYPE}",
+        config={
+            "dataset_name":        DATSET_NAME,
+            "run_mode":            "cma",
+            "sensitive_attribute": SENSITIVE_ATTRIBUTE,
+            "behavior_policy_type": BEHAVIOR_POLICY_TYPE,
+            "constraint_type":     CONSTRAINT_TYPE,
+            "disparity_type":      DISPARITY_TYPE,
+            "epsilon":             EPSILON,
+            "fail_prob":           FAIL_PROB,
+            "sigma0":              SIGMA0,
+            "maxiter":             MAXITER,
+            "popsize":             POPSIZE,
+            "eval_freq":           EVAL_FREQ,
+        },
+    )
+
     datasets = joblib.load(BANDIT_DATA_PATH)
     data        = datasets[BEHAVIOR_POLICY_TYPE]
     train_data  = data['train']
@@ -120,11 +185,12 @@ if __name__ == "__main__":
     n_actions = max(train_data['actions']['true_label'].max(),
                     train_data['actions']['action'].max()) + 1
 
-    train_X    = train_data['context'].values
-    train_a    = train_data['actions']['action'].values
-    train_pi_b = train_data['actions']['propensity'].values
-    train_r    = train_data['reward'].values
-    train_s    = train_data['sensitive'].values
+    train_X          = train_data['context'].values
+    train_a          = train_data['actions']['action'].values
+    train_pi_b       = train_data['actions']['propensity'].values
+    train_r          = train_data['reward'].values
+    train_s          = train_data['sensitive'].values
+    train_true_labels = train_data['actions']['true_label'].values
 
     policy = LinearPolicy(input_dim, n_actions)
     x0     = np.zeros(policy.param_dim)
@@ -147,6 +213,7 @@ if __name__ == "__main__":
     if POPSIZE is not None:
         cma_opts['popsize'] = POPSIZE
 
+    generation = 0
     es = cma.CMAEvolutionStrategy(x0, SIGMA0, cma_opts)
     while not es.stop():
         solutions = es.ask()
@@ -158,6 +225,27 @@ if __name__ == "__main__":
         )
         es.tell(solutions, fitnesses)
         es.disp()
+
+        feasible = [f for f in fitnesses if f < 1e5]
+        log_dict = {
+            'train/n_feasible': len(feasible),
+            'train/fbest': -es.result.fbest if es.result.fbest < 1e5 else float('nan'),
+        }
+        if generation % EVAL_FREQ == 0:
+            m = eval_metrics(es.result.xbest, train_X, train_a, train_pi_b, train_r, train_s,
+                             train_true_labels, policy, BATCH_SIZE, constraint_kwargs)
+            log_dict.update({
+                'eval/mean_is_reward':  m['mean_is_reward'],
+                'eval/mean_g1':         m['mean_g1'],
+                'eval/mean_g2':         m['mean_g2'],
+                'eval/abs_diff':        m['abs_diff'],
+                'eval/ucb_abs_diff':    m['ucb_abs_diff'],
+                'eval/on_policy_reward': m['on_policy_reward'],
+                'eval/on_policy_g1':    m['on_policy_g1'],
+                'eval/on_policy_g2':    m['on_policy_g2'],
+            })
+        wandb.log(log_dict, step=generation)
+        generation += 1
 
     best_params = es.result.xbest
     np.save(os.path.join(OUTPUT_DIR, 'best_params.npy'), best_params)
