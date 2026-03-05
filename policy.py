@@ -3,11 +3,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class PolicyNet(nn.Module):
-    def __init__(self, input_dim, n_actions):
+    def __init__(self, input_dim, n_actions, hidden_dim=128):
         super(PolicyNet, self).__init__()
-        self.fc1 = nn.Linear(input_dim, 256)
-        self.fc2 = nn.Linear(256, 256)
-        self.output = nn.Linear(256, n_actions)
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.output = nn.Linear(hidden_dim, n_actions)
+        #self.output = nn.Linear(input_dim, n_actions)
 
     def forward(self, x):
         x = F.relu(self.fc1(x))

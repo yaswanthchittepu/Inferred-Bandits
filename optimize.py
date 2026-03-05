@@ -9,6 +9,7 @@ from utils import students_ttest_ucb_constraint, welchs_ttest_ucb_constraint, sa
 import math
 import joblib
 import os, sys, ipdb
+import json
 import argparse
 import yaml
 import wandb
@@ -31,12 +32,15 @@ if __name__ == "__main__":
     parser.add_argument('--disparity_type',       type=str,   default=None)
     parser.add_argument('--num_epochs',           type=int,   default=None)
     parser.add_argument('--batch_size',           type=int,   default=None)
+    parser.add_argument('--max_ex_train',         type=int,   default=None)
+    parser.add_argument('--train_frac',           type=float, default=None)
     parser.add_argument('--param_opt_lr',         type=float, default=None)
     parser.add_argument('--dual_opt_lr',          type=float, default=None)
     parser.add_argument('--epsilon',              type=float, default=None)
     parser.add_argument('--fail_prob',            type=float, default=None)
     parser.add_argument('--log_lambda_max',       type=float, default=None)
     parser.add_argument('--eval_freq',            type=int,   default=None)
+    parser.add_argument('--hidden_dim',           type=int,   default=None)
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -58,16 +62,20 @@ if __name__ == "__main__":
     DISPARITY_TYPE       = cfg['disparity_type']
     NUM_EPOCHS           = cfg['num_epochs']
     BATCH_SIZE           = cfg['batch_size']
+    MAX_EX_TRAIN         = cfg.get('max_ex_train', None)
+    TRAIN_FRAC           = cfg.get('train_frac', 1.0)
     PARAM_OPT_LR         = cfg['param_opt_lr']
     DUAL_OPT_LR          = cfg['dual_opt_lr']
     EPSILON              = cfg['epsilon']
     FAIL_PROB            = cfg['fail_prob']
     LOG_LAMBDA_MAX       = cfg['log_lambda_max']
     EVAL_FREQ            = cfg['eval_freq']
+    HIDDEN_DIM           = cfg.get('hidden_dim', 128)
     CONSTRAINT_TRUNC     = CONSTRAINT_TYPE.split('-')[0]
     OUTPUT_DIR           = os.path.join(cfg['output_dir'], DATSET_NAME, SENSITIVE_ATTRIBUTE,
                                         CONSTRAINT_TRUNC, BEHAVIOR_POLICY_TYPE)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+    GLOBAL_RESULTS_PATH  = cfg.get('global_results_path', None)
     SEED                 = cfg['seed']
 
     torch.manual_seed(SEED)
@@ -108,11 +116,42 @@ if __name__ == "__main__":
     safety_data = data['safety']
     test_data   = data['test']
 
+    def _subset_train(keep_idx):
+        return {
+            'context': train_data['context'].iloc[keep_idx].reset_index(drop=True),
+            'actions': train_data['actions'].iloc[keep_idx].reset_index(drop=True),
+            'reward': train_data['reward'].iloc[keep_idx].reset_index(drop=True),
+            'sensitive': train_data['sensitive'].iloc[keep_idx].reset_index(drop=True),
+        }
+
+    # Optional: cap training data size before applying train_frac
+    if MAX_EX_TRAIN is not None:
+        if MAX_EX_TRAIN <= 0:
+            raise ValueError(f"max_ex_train must be > 0, got {MAX_EX_TRAIN}")
+        n_train = len(train_data['context'])
+        if MAX_EX_TRAIN < n_train:
+            rng = np.random.RandomState(SEED)
+            keep_idx = rng.permutation(n_train)[:MAX_EX_TRAIN]
+            train_data = _subset_train(keep_idx)
+            print(f"Capped train split to {MAX_EX_TRAIN}/{n_train} examples using seed {SEED}")
+
+    # Optional: subsample training data only (safety/test untouched)
+    if not (0.0 < TRAIN_FRAC <= 1.0):
+        raise ValueError(f"train_frac must be in (0, 1], got {TRAIN_FRAC}")
+    if TRAIN_FRAC < 1.0:
+        n_train = len(train_data['context'])
+        n_keep = max(1, int(n_train * TRAIN_FRAC))
+        rng = np.random.RandomState(SEED)
+        keep_idx = rng.permutation(n_train)[:n_keep]
+        train_data = _subset_train(keep_idx)
+        print(f"Subsampled train split to {n_keep}/{n_train} "
+              f"({TRAIN_FRAC:.2f}) using seed {SEED}")
+
     # Setup Hyperparameters
     input_dim = train_data['context'].shape[1]  # Number of context features
     n_actions = max(train_data['actions']['true_label'].max(),
                 train_data['actions']['action'].max()) + 1
-    policy = PolicyNet(input_dim, n_actions).to(device)
+    policy = PolicyNet(input_dim, n_actions, hidden_dim=HIDDEN_DIM).to(device)
     optimizer = torch.optim.Adam(policy.parameters(), lr=PARAM_OPT_LR)
 
     # Lagrangian multipliers in log space (exp ensures positivity) — seldonian and lagrange_exp
@@ -282,10 +321,14 @@ if __name__ == "__main__":
     print(f"Saved policy → {os.path.join(OUTPUT_DIR, 'policy.pt')}")
 
     # Perform Safety Test
-    safety_flag = safety_test(policy, safety_data, device, constraint_kwargs, batch_size=BATCH_SIZE)
+    safety_flag, safety_metrics = safety_test(
+        policy, safety_data, device, constraint_kwargs, batch_size=BATCH_SIZE, return_metrics=True
+    )
 
     # Verify test data
-    test_flag = evaluate_on_test(policy, test_data, device, constraint_kwargs, batch_size=BATCH_SIZE)
+    test_flag, test_metrics = evaluate_on_test(
+        policy, test_data, device, constraint_kwargs, batch_size=BATCH_SIZE, return_metrics=True
+    )
 
     if safety_flag == 'Safe' and test_flag == 'Unsafe':
         verdict = "Error: Our High Confidence Algorithm failed"
@@ -299,4 +342,65 @@ if __name__ == "__main__":
         f.write(f"safety_flag: {safety_flag}\n")
         f.write(f"test_flag:   {test_flag}\n")
         f.write(f"verdict:     {verdict}\n")
+        f.write(f"safety_epsilon: {safety_metrics['epsilon']}\n")
+        f.write(f"safety_ucb_g1_v_g2: {safety_metrics['ucb_g1_v_g2']}\n")
+        f.write(f"safety_ucb_g2_v_g1: {safety_metrics['ucb_g2_v_g1']}\n")
+        f.write(f"safety_group_1_mean: {safety_metrics['group_1_mean']}\n")
+        f.write(f"safety_group_2_mean: {safety_metrics['group_2_mean']}\n")
+        f.write(f"safety_group_1_std: {safety_metrics['group_1_std']}\n")
+        f.write(f"safety_group_2_std: {safety_metrics['group_2_std']}\n")
+        f.write(f"safety_n_group_1: {safety_metrics['n_group_1']}\n")
+        f.write(f"safety_n_group_2: {safety_metrics['n_group_2']}\n")
+        f.write(f"test_epsilon: {test_metrics['epsilon']}\n")
+        f.write(f"test_constraint: {test_metrics['constraint']}\n")
+        f.write(f"test_group_1_mean: {test_metrics['group_1_mean']}\n")
+        f.write(f"test_group_2_mean: {test_metrics['group_2_mean']}\n")
+        f.write(f"test_n_group_1: {test_metrics['n_group_1']}\n")
+        f.write(f"test_n_group_2: {test_metrics['n_group_2']}\n")
+        f.write(f"test_mean_is_reward: {test_metrics['mean_is_reward']}\n")
     print(f"Saved results → {results_path}")
+
+    # Append to global JSON results (optional)
+    if GLOBAL_RESULTS_PATH:
+        os.makedirs(os.path.dirname(GLOBAL_RESULTS_PATH), exist_ok=True)
+        record = {
+            'seed': SEED,
+            'mode': MODE,
+            'train_frac': TRAIN_FRAC,
+            'max_ex_train': MAX_EX_TRAIN,
+            'dataset_name': DATSET_NAME,
+            'sensitive_attribute': SENSITIVE_ATTRIBUTE,
+            'behavior_policy_type': BEHAVIOR_POLICY_TYPE,
+            'constraint_type': CONSTRAINT_TYPE,
+            'disparity_type': DISPARITY_TYPE,
+            'output_dir': OUTPUT_DIR,
+            'safety_flag': safety_flag,
+            'test_flag': test_flag,
+            'verdict': verdict,
+            'safety': safety_metrics,
+            'test': test_metrics,
+        }
+
+        try:
+            import fcntl
+        except ImportError:
+            fcntl = None
+
+        with open(GLOBAL_RESULTS_PATH, 'a+', encoding='utf-8') as f:
+            if fcntl is not None:
+                fcntl.flock(f, fcntl.LOCK_EX)
+            f.seek(0)
+            content = f.read().strip()
+            data = json.loads(content) if content else {}
+            mode_key = str(MODE)
+            frac_key = str(TRAIN_FRAC)
+            seed_key = str(SEED)
+            data.setdefault(mode_key, {}).setdefault(frac_key, {})[seed_key] = record
+            f.seek(0)
+            f.truncate()
+            json.dump(data, f, indent=2, sort_keys=True)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+            if fcntl is not None:
+                fcntl.flock(f, fcntl.LOCK_UN)

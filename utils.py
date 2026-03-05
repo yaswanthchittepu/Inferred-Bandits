@@ -197,7 +197,7 @@ def gather_is_rewards(policy, data, device, batch_size):
     return torch.cat(all_is_rewards), torch.cat(all_is_actions), torch.cat(all_sensitive)  # all (N,)
 
 
-def safety_test(policy, safety_data, device, constraint_kwargs, batch_size=128):
+def safety_test(policy, safety_data, device, constraint_kwargs, batch_size=128, return_metrics=False):
 
     all_is_rewards, all_is_actions, all_sensitive = gather_is_rewards(policy, safety_data, device, batch_size)
 
@@ -219,8 +219,21 @@ def safety_test(policy, safety_data, device, constraint_kwargs, batch_size=128):
 
         ucb_g1_v_g2 = group_1_is_metric_mean - group_2_is_metric_mean + K1*group_1_is_metric_std + K2*group_2_is_metric_std
         ucb_g2_v_g1 = group_2_is_metric_mean - group_1_is_metric_mean + K1*group_1_is_metric_std + K2*group_2_is_metric_std
-
-        return 'Safe' if (ucb_g1_v_g2.item() < constraint_kwargs['epsilon'] and ucb_g2_v_g1.item() < constraint_kwargs['epsilon']) else 'NSF'
+        flag = 'Safe' if (ucb_g1_v_g2.item() < constraint_kwargs['epsilon'] and ucb_g2_v_g1.item() < constraint_kwargs['epsilon']) else 'NSF'
+        if return_metrics:
+            metrics = {
+                'ucb_g1_v_g2': ucb_g1_v_g2.item(),
+                'ucb_g2_v_g1': ucb_g2_v_g1.item(),
+                'epsilon': constraint_kwargs['epsilon'],
+                'group_1_mean': group_1_is_metric_mean.item(),
+                'group_2_mean': group_2_is_metric_mean.item(),
+                'group_1_std': group_1_is_metric_std.item(),
+                'group_2_std': group_2_is_metric_std.item(),
+                'n_group_1': int(all_sensitive.sum().item()),
+                'n_group_2': int((~all_sensitive).sum().item()),
+            }
+            return flag, metrics
+        return flag
 
     elif(constraint_kwargs['constraint_type'] == 'welchs-ttest'):
         satterthwaite_v_num = (group_1_is_metric_std**2 / constraint_kwargs['safety_data_grp_1_size']) + (group_2_is_metric_std**2 / constraint_kwargs['safety_data_grp_2_size'])
@@ -230,13 +243,26 @@ def safety_test(policy, safety_data, device, constraint_kwargs, batch_size=128):
 
         ucb_g1_v_g2 = group_1_is_metric_mean - group_2_is_metric_mean + K*torch.sqrt((group_1_is_metric_std**2 / constraint_kwargs['safety_data_grp_1_size']) + (group_2_is_metric_std**2 / constraint_kwargs['safety_data_grp_2_size']))
         ucb_g2_v_g1 = group_2_is_metric_mean - group_1_is_metric_mean + K*torch.sqrt((group_1_is_metric_std**2 / constraint_kwargs['safety_data_grp_1_size']) + (group_2_is_metric_std**2 / constraint_kwargs['safety_data_grp_2_size']))
-
-        return 'Safe' if (ucb_g1_v_g2.item() < constraint_kwargs['epsilon'] and ucb_g2_v_g1.item() < constraint_kwargs['epsilon']) else 'NSF'
+        flag = 'Safe' if (ucb_g1_v_g2.item() < constraint_kwargs['epsilon'] and ucb_g2_v_g1.item() < constraint_kwargs['epsilon']) else 'NSF'
+        if return_metrics:
+            metrics = {
+                'ucb_g1_v_g2': ucb_g1_v_g2.item(),
+                'ucb_g2_v_g1': ucb_g2_v_g1.item(),
+                'epsilon': constraint_kwargs['epsilon'],
+                'group_1_mean': group_1_is_metric_mean.item(),
+                'group_2_mean': group_2_is_metric_mean.item(),
+                'group_1_std': group_1_is_metric_std.item(),
+                'group_2_std': group_2_is_metric_std.item(),
+                'n_group_1': int(all_sensitive.sum().item()),
+                'n_group_2': int((~all_sensitive).sum().item()),
+            }
+            return flag, metrics
+        return flag
     else:
         raise ValueError(f"Invalid constraint type provided: {constraint_kwargs['constraint_type']}")
 
 
-def evaluate_on_test(policy, test_data, device, constraint_kwargs, batch_size=128):
+def evaluate_on_test(policy, test_data, device, constraint_kwargs, batch_size=128, return_metrics=False):
 
     all_is_rewards, all_is_actions, all_sensitive = gather_is_rewards(policy, test_data, device, batch_size)
 
@@ -249,5 +275,57 @@ def evaluate_on_test(policy, test_data, device, constraint_kwargs, batch_size=12
     else:
         raise ValueError(f"Invalid disparity type provided: {constraint_kwargs['disparity_type']}")
 
-    constraint = torch.abs(group_1_is_metric.mean() - group_2_is_metric.mean())
-    return 'Safe' if(constraint.item() < constraint_kwargs['epsilon']) else 'Unsafe'
+    group_1_mean = group_1_is_metric.mean()
+    group_2_mean = group_2_is_metric.mean()
+    constraint = torch.abs(group_1_mean - group_2_mean)
+    flag = 'Safe' if(constraint.item() < constraint_kwargs['epsilon']) else 'Unsafe'
+    if return_metrics:
+        metrics = {
+            'constraint': constraint.item(),
+            'epsilon': constraint_kwargs['epsilon'],
+            'group_1_mean': group_1_mean.item(),
+            'group_2_mean': group_2_mean.item(),
+            'mean_is_reward': all_is_rewards.mean().item(),
+            'n_group_1': int(all_sensitive.sum().item()),
+            'n_group_2': int((~all_sensitive).sum().item()),
+        }
+        return flag, metrics
+    return flag
+
+
+def bound_propagation(is_reward, is_action, output_probs_a, sensitive_mask, constraint_kwargs):
+    """
+    Return lower/upper bounds on |E_g1[metric] - E_g2[metric]|.
+    """
+    if constraint_kwargs['disparity_type'] == 'reward':
+        group_1_is_metric = is_reward[sensitive_mask]
+        group_2_is_metric = is_reward[~sensitive_mask]
+    elif constraint_kwargs['disparity_type'] == 'action':
+        group_1_is_metric = is_action[sensitive_mask]
+        group_2_is_metric = is_action[~sensitive_mask]
+    else:
+        raise ValueError(f"Invalid disparity type provided: {constraint_kwargs['disparity_type']}")
+
+    group_1_is_metric_mean, group_1_is_metric_std = group_1_is_metric.mean(), group_1_is_metric.std(correction=1)
+    group_2_is_metric_mean, group_2_is_metric_std = group_2_is_metric.mean(), group_2_is_metric.std(correction=1)
+
+    K1 = stats.t.ppf(1 - (constraint_kwargs['fail_prob']/4.0), constraint_kwargs['safety_data_grp_1_size']-1) / math.sqrt(constraint_kwargs['safety_data_grp_1_size'])
+    K2 = stats.t.ppf(1 - (constraint_kwargs['fail_prob']/4.0), constraint_kwargs['safety_data_grp_2_size']-1) / math.sqrt(constraint_kwargs['safety_data_grp_2_size'])
+
+    ucb_g1 = group_1_is_metric_mean + (K1 * group_1_is_metric_std)
+    ucb_g2 = group_2_is_metric_mean + (K2 * group_2_is_metric_std)
+    lcb_g1 = group_1_is_metric_mean - (K1 * group_1_is_metric_std)
+    lcb_g2 = group_2_is_metric_mean - (K2 * group_2_is_metric_std)
+
+    ucb_g1_diff_g2 = ucb_g1 - lcb_g2
+    lcb_g1_diff_g2 = lcb_g1 - ucb_g2
+
+    # Absolute value rule on d = E_g1 - E_g2, d ∈ [l, u]
+    ucb_abs_diff = torch.max(torch.abs(lcb_g1_diff_g2), torch.abs(ucb_g1_diff_g2))
+    lcb_abs_diff = torch.where(
+        (lcb_g1_diff_g2 <= 0) & (ucb_g1_diff_g2 >= 0),
+        torch.zeros(1, device=ucb_abs_diff.device),
+        torch.min(torch.abs(lcb_g1_diff_g2), torch.abs(ucb_g1_diff_g2))
+    )
+
+    return lcb_abs_diff, ucb_abs_diff
