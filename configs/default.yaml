@@ -12,7 +12,7 @@ num_epochs: 100
 batch_size: 128
 param_opt_lr: 1.0e-4
 dual_opt_lr: 5.0e-2
-epsilon: 0.2
+epsilon: 0.3
 fail_prob: 0.05
 log_lambda_max: 2
 eval_freq: 25

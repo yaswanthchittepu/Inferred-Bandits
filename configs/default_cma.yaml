@@ -1,0 +1,15 @@
+seed: 42
+output_dir: ./outputs
+dataset_name: adult_income
+sensitive_attribute: gender
+behavior_policy_type: random
+bandit_data_dir: ./bandit_datasets
+constraint_type: students-ttest
+disparity_type: reward
+epsilon: 0.3
+fail_prob: 0.05
+sigma0: 1.0
+maxiter: 1000
+popsize: null
+batch_size: 128
+n_jobs: 1

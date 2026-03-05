@@ -19,10 +19,12 @@ pip install -r requirements.txt
 ## File Structure
 
 ```
-optimize.py          # Main training script
-policy.py            # PolicyNet definition
-utils.py             # Constraint functions, safety test, test evaluation
-configs/default.yaml # Default hyperparameters
+optimize.py             # Main training script (gradient-based)
+optimize_cma.py         # CMA-ES training script (derivative-free)
+policy.py               # PolicyNet definition
+utils.py                # Constraint functions, safety test, test evaluation
+configs/default.yaml    # Default hyperparameters for optimize.py
+configs/default_cma.yaml # Default hyperparameters for optimize_cma.py
 bandit_data_pipeline.py # Data preprocessing and dataset creation
 ```
 
@@ -179,7 +181,58 @@ python optimize.py --config configs/default.yaml --mode seldonian --seed 0
 
 ---
 
-## Outputs
+## CMA-ES Optimization (`optimize_cma.py`)
+
+An alternative to the gradient-based approach using **CMA-ES** (Covariance Matrix Adaptation Evolution Strategy), a derivative-free black-box optimizer.
+
+### Policy
+
+`LinearPolicy` is a pure numpy softmax policy (no PyTorch autograd):
+```
+logits = x @ W.T + b    →    softmax    →    action probs
+```
+Parameters are a flat vector `[W, b]` of size `input_dim * n_actions + n_actions`.
+
+### Objective
+
+For each candidate parameter vector, iterate over training data and compute the mean IS-weighted reward. CMA-ES **minimizes**, so the objective returned is the **negated** mean IS-reward.
+
+### Constraint
+
+Uses `bound_propagation` (from `utils.py`) to compute a UCB on `|E_g1 - E_g2|`. If the UCB exceeds `epsilon`, the solution is assigned a hard barrier penalty (`1e6`). Otherwise the IS-return objective is used.
+
+```
+if ucb_abs_diff > epsilon:   fitness = 1e6        # infeasible
+else:                        fitness = -mean_is_return
+```
+
+### Parallelism
+
+Candidate solutions within each generation are evaluated in parallel using `joblib.Parallel`. Control with `n_jobs` (default: `-1` = all CPUs).
+
+### Usage
+
+```bash
+python optimize_cma.py --config configs/default_cma.yaml
+```
+
+| Parameter | Description |
+|---|---|
+| `sigma0` | Initial step size for CMA-ES |
+| `maxiter` | Maximum number of CMA-ES generations |
+| `popsize` | Population size per generation (null = CMA-ES default: `4 + floor(3*ln(N))`) |
+| `n_jobs` | Number of parallel workers for solution evaluation |
+
+### Outputs
+
+Saved to `{output_dir}/{dataset}/{sensitive_attr}/{constraint_trunc}/{behavior_policy}/cma/`:
+
+- `best_params.npy` — best found parameter vector
+- `results.txt` — seed, safety_flag, test_flag, verdict
+
+---
+
+## Outputs (`optimize.py`)
 
 Saved to `{output_dir}/{dataset}/{sensitive_attr}/{constraint_trunc}/{behavior_policy}/`:
 

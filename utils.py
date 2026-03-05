@@ -251,3 +251,51 @@ def evaluate_on_test(policy, test_data, device, constraint_kwargs, batch_size=12
 
     constraint = torch.abs(group_1_is_metric.mean() - group_2_is_metric.mean())
     return 'Safe' if(constraint.item() < constraint_kwargs['epsilon']) else 'Unsafe'
+
+
+def bound_propagation(is_reward, is_action, output_probs_a, sensitive_mask, constraint_kwargs):
+    """
+        This function returns the lower and upper bound of |E[.|A] - E[.|B]| 
+    """
+    # First compute LCB and UCB of E[.|A]
+    # Constraint Terms
+    if(constraint_kwargs['disparity_type'] == 'reward'):
+        group_1_is_metric = is_reward[sensitive_mask]
+        group_2_is_metric = is_reward[~sensitive_mask]
+    elif(constraint_kwargs['disparity_type'] == 'action'):
+        group_1_is_metric = is_action[sensitive_mask]
+        group_2_is_metric = is_action[~sensitive_mask]
+    else:
+        raise ValueError(f"Invalid disparity type provided: {constraint_kwargs['disparity_type']}")
+
+    group_1_is_metric_mean, group_1_is_metric_std = group_1_is_metric.mean(), group_1_is_metric.std(correction=1)
+    group_2_is_metric_mean, group_2_is_metric_std = group_2_is_metric.mean(), group_2_is_metric.std(correction=1)
+    group_1_probs_a = output_probs_a[sensitive_mask]
+    group_2_probs_a = output_probs_a[~sensitive_mask]
+
+    K1 = stats.t.ppf(1 - (constraint_kwargs['fail_prob']/4.0), constraint_kwargs['safety_data_grp_1_size']-1)/math.sqrt(constraint_kwargs['safety_data_grp_1_size'])
+    K2 = stats.t.ppf(1 - (constraint_kwargs['fail_prob']/4.0), constraint_kwargs['safety_data_grp_2_size']-1)/math.sqrt(constraint_kwargs['safety_data_grp_2_size'])
+
+    ucb_g1 = group_1_is_metric_mean + (K1 * group_1_is_metric_std)
+    ucb_g2 = group_2_is_metric_mean + (K2 * group_2_is_metric_std)
+
+    lcb_g1 = group_1_is_metric_mean - (K1 * group_1_is_metric_std)
+    lcb_g2 = group_2_is_metric_mean - (K2 * group_2_is_metric_std)
+
+    ucb_g1_diff_g2 = ucb_g1 - lcb_g2
+    lcb_g1_diff_g2 = lcb_g1 - ucb_g2
+
+    # Absolute value rule on d = E_g1 - E_g2, d ∈ [lcb_g1_diff_g2, ucb_g1_diff_g2]
+    # If 0 ∈ [l, u]: |d| ∈ [0,          max(|l|, |u|)]
+    # Otherwise:      |d| ∈ [min(|l|,|u|), max(|l|, |u|)]
+    ucb_abs_diff = torch.max(torch.abs(lcb_g1_diff_g2), torch.abs(ucb_g1_diff_g2))
+    lcb_abs_diff = torch.where(
+        (lcb_g1_diff_g2 <= 0) & (ucb_g1_diff_g2 >= 0),
+        torch.zeros(1, device=ucb_abs_diff.device),
+        torch.min(torch.abs(lcb_g1_diff_g2), torch.abs(ucb_g1_diff_g2))
+    )
+
+    return lcb_abs_diff, ucb_abs_diff
+
+
+
