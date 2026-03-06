@@ -81,6 +81,9 @@ if __name__ == "__main__":
     parser.add_argument('--n_jobs',               type=int,   default=None)
     parser.add_argument('--train_frac',           type=float, default=None)
     parser.add_argument('--max_ex_train',         type=int,   default=None)
+    parser.add_argument('--inferred_proportion',  type=float, default=None)
+    parser.add_argument('--fpr',                  type=float, default=None)
+    parser.add_argument('--fnr',                  type=float, default=None)
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -105,11 +108,18 @@ if __name__ == "__main__":
     N_JOBS               = cfg.get('n_jobs', -1)
     TRAIN_FRAC           = cfg.get('train_frac', 1.0)
     MAX_EX_TRAIN         = cfg.get('max_ex_train', None)
+    INFERRED_PROPORTION  = cfg.get('inferred_proportion', 0.0)
+    FPR                  = cfg.get('fpr', 0.0)
+    FNR                  = cfg.get('fnr', 0.0)
     CONSTRAINT_TRUNC     = CONSTRAINT_TYPE.split('-')[0]
     OUTPUT_DIR           = os.path.join(cfg['output_dir'], DATSET_NAME, SENSITIVE_ATTRIBUTE,
                                         CONSTRAINT_TRUNC, BEHAVIOR_POLICY_TYPE, 'cma')
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     GLOBAL_RESULTS_PATH  = cfg.get('global_results_path', None)
+    if GLOBAL_RESULTS_PATH and INFERRED_PROPORTION and INFERRED_PROPORTION > 0.0:
+        base, ext = os.path.splitext(GLOBAL_RESULTS_PATH)
+        if not base.endswith("_inferred"):
+            GLOBAL_RESULTS_PATH = f"{base}_inferred{ext or '.json'}"
     SEED                 = cfg['seed']
 
     np.random.seed(SEED)
@@ -163,6 +173,40 @@ if __name__ == "__main__":
         train_r = train_r[keep_idx]
         train_s = train_s[keep_idx]
         print(f"Subsampled train split to {n_keep}/{n_train} ({TRAIN_FRAC:.4f}) using seed {SEED}")
+
+    # Optional: corrupt sensitive labels for inferred-attribute experiments (train only)
+    if INFERRED_PROPORTION and INFERRED_PROPORTION > 0.0:
+        if not (0.0 < INFERRED_PROPORTION < 1.0):
+            raise ValueError(f"inferred_proportion must be in (0, 1), got {INFERRED_PROPORTION}")
+        if not (0.0 <= FPR <= 1.0):
+            raise ValueError(f"fpr must be in [0, 1], got {FPR}")
+        if not (0.0 <= FNR <= 1.0):
+            raise ValueError(f"fnr must be in [0, 1], got {FNR}")
+        n_train = len(train_s)
+        n_inferred = int(n_train * INFERRED_PROPORTION)
+        rng = np.random.RandomState(SEED)
+        inferred_idx = rng.choice(n_train, size=n_inferred, replace=False)
+        print(f"Train split — ground-truth: {n_train - n_inferred}, inferred: {n_inferred} "
+              f"(proportion={INFERRED_PROPORTION}, fpr={FPR}, fnr={FNR})")
+
+        sensitive_noisy = train_s.ravel().copy().astype(int)
+        inferred_orig   = sensitive_noisy[inferred_idx]
+
+        flip_probs      = np.where(inferred_orig == 0, FPR, FNR)
+        flip_mask       = rng.random(n_inferred) < flip_probs
+        
+        sensitive_noisy[inferred_idx[flip_mask]] = 1 - sensitive_noisy[inferred_idx[flip_mask]]
+        n_fp = int(flip_mask[inferred_orig == 0].sum())
+        n_fn = int(flip_mask[inferred_orig == 1].sum())
+        print(f"Inferred flips — FP (0→1): {n_fp}, FN (1→0): {n_fn}, total: {flip_mask.sum()}")
+
+        train_s = sensitive_noisy
+        is_inferred = np.zeros(n_train, dtype=bool)
+        is_inferred[inferred_idx] = True
+        gt_sensitive     = sensitive_noisy[~is_inferred]
+        train_grp_1_size = int(gt_sensitive.sum())
+        train_grp_2_size = int((~is_inferred).sum()) - train_grp_1_size
+        print(f"Ground-truth partition — grp1 (sens=1): {train_grp_1_size}, grp2 (sens=0): {train_grp_2_size}")
 
     policy = LinearPolicy(input_dim, n_actions)
     x0     = np.zeros(policy.param_dim)
@@ -272,6 +316,10 @@ if __name__ == "__main__":
     results_path = os.path.join(OUTPUT_DIR, 'results.txt')
     with open(results_path, 'w') as f:
         f.write(f"seed:        {SEED}\n")
+        if INFERRED_PROPORTION and INFERRED_PROPORTION > 0.0:
+            f.write(f"inferred_proportion: {INFERRED_PROPORTION}\n")
+            f.write(f"fpr: {FPR}\n")
+            f.write(f"fnr: {FNR}\n")
         f.write(f"safety_flag: {safety_flag}\n")
         f.write(f"test_flag:   {test_flag}\n")
         f.write(f"verdict:     {verdict}\n")
@@ -300,6 +348,9 @@ if __name__ == "__main__":
             'mode': 'cma',
             'train_frac': TRAIN_FRAC,
             'max_ex_train': MAX_EX_TRAIN,
+            'inferred_proportion': INFERRED_PROPORTION,
+            'fpr': FPR,
+            'fnr': FNR,
             'dataset_name': DATSET_NAME,
             'sensitive_attribute': SENSITIVE_ATTRIBUTE,
             'behavior_policy_type': BEHAVIOR_POLICY_TYPE,
@@ -324,10 +375,15 @@ if __name__ == "__main__":
             f.seek(0)
             content = f.read().strip()
             data = json.loads(content) if content else {}
-            mode_key = 'cma'
+            mode_key = 'cma_inferred' if INFERRED_PROPORTION and INFERRED_PROPORTION > 0.0 else 'cma'
             frac_key = str(TRAIN_FRAC)
             seed_key = str(SEED)
-            data.setdefault(mode_key, {}).setdefault(frac_key, {})[seed_key] = record
+            if INFERRED_PROPORTION and INFERRED_PROPORTION > 0.0:
+                fpr_key = f"fpr_{FPR}"
+                fnr_key = f"fnr_{FNR}"
+                data.setdefault(mode_key, {}).setdefault(fpr_key, {}).setdefault(fnr_key, {}).setdefault(frac_key, {})[seed_key] = record
+            else:
+                data.setdefault(mode_key, {}).setdefault(frac_key, {})[seed_key] = record
             f.seek(0)
             f.truncate()
             json.dump(data, f, indent=2, sort_keys=True)

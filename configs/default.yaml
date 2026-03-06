@@ -13,6 +13,9 @@ num_epochs: 100
 batch_size: 128
 max_ex_train: null
 train_frac: 1.0
+inferred_proportion: 0.0
+fpr: 0.0
+fnr: 0.0
 hidden_dim: 128
 param_opt_lr: 1.0e-4
 dual_opt_lr: 5.0e-2
