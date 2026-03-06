@@ -19,15 +19,17 @@ pip install -r requirements.txt
 ## File Structure
 
 ```
-optimize.py                          # Main training script (gradient-based)
-optimize_cma.py                      # CMA-ES training script (derivative-free)
-inferred-optimize-no-safe.py         # Gradient-based script with inferred (noisy) sensitive attributes
-policy.py                            # PolicyNet definition
-utils.py                             # Constraint functions, safety test, test evaluation
-configs/default.yaml                 # Default hyperparameters for optimize.py
-configs/default_cma.yaml             # Default hyperparameters for optimize_cma.py
-configs/default_inferred_no_safe.yaml # Default hyperparameters for inferred-optimize-no-safe.py
-bandit_data_pipeline.py              # Data preprocessing and dataset creation
+optimize.py                               # Main training script (gradient-based)
+optimize_cma.py                           # CMA-ES training script (derivative-free)
+inferred-optimize-no-safe.py              # Gradient-based script with inferred (noisy) sensitive attributes
+inferred-optimize-no-safe-cma.py          # CMA-ES script with inferred (noisy) sensitive attributes
+policy.py                                 # PolicyNet definition
+utils.py                                  # Constraint functions, safety test, test evaluation
+configs/default.yaml                      # Default hyperparameters for optimize.py
+configs/default_cma.yaml                  # Default hyperparameters for optimize_cma.py
+configs/default_inferred_no_safe.yaml     # Default hyperparameters for inferred-optimize-no-safe.py
+configs/default_inferred_no_safe_cma.yaml # Default hyperparameters for inferred-optimize-no-safe-cma.py
+bandit_data_pipeline.py                   # Data preprocessing and dataset creation
 ```
 
 ---
@@ -322,6 +324,54 @@ Saved to `{output_dir}/{dataset}/{sensitive_attr}/{constraint_trunc}/{behavior_p
 
 - `best_params.npy` — best found parameter vector
 - `results.txt` — seed, safety_flag, test_flag, verdict
+
+---
+
+## Inferred CMA-ES (`inferred-optimize-no-safe-cma.py`)
+
+Combines the CMA-ES derivative-free optimizer from `optimize_cma.py` with the inferred sensitive attribute handling from `inferred-optimize-no-safe.py`. Useful when you want the black-box optimizer but training data has partially noisy group labels.
+
+### Policy
+
+Same `LinearPolicy` (numpy softmax) as `optimize_cma.py`. No PyTorch autograd required.
+
+### Inferred Partition
+
+Identical split and flipping logic as `inferred-optimize-no-safe.py`: `inferred_proportion` of training data has its sensitive attribute corrupted with asymmetric FPR/FNR noise.
+
+### Barrier Function (`inferred_bound_barrier`)
+
+Unlike `optimize_cma.py` which uses `bound_propagation` directly, this script uses `inferred_bound_barrier` — a dedicated function that accounts for label noise in the inferred partition.
+
+It computes the M-matrix (confusion matrix of posterior probabilities) and its inverse, then constructs separate UCBs for the ground-truth and inferred partitions:
+
+```
+E[X | S=1] ≈ p1 * E[X|S=1, ground]  +  p2 * E[X|S'=1, inferred]  +  p3 * E[X|S'=0, inferred]
+```
+
+where `p2`, `p3` are weighted by `M_inv` rows to correct for label noise. A t-test UCB is applied only on the ground-truth term (where labels are reliable); inferred means are used without a UCB correction.
+
+```
+if ucb_abs_diff > epsilon:   fitness = 1e6        # infeasible
+else:                        fitness = -mean_is_reward
+```
+
+### Usage
+
+```bash
+python inferred-optimize-no-safe-cma.py --config configs/default_inferred_no_safe_cma.yaml
+```
+
+All CMA-ES parameters (`sigma0`, `maxiter`, `popsize`, `n_jobs`, `eval_freq`) and inferred parameters (`inferred_proportion`, `fpr`, `fnr`) are supported. See `configs/default_inferred_no_safe_cma.yaml`.
+
+### Outputs
+
+Saved to `{output_dir}/{dataset}/{sensitive_attr}/{constraint_trunc}/{behavior_policy}/inferred_cma/`:
+
+- `best_params.npy` — best found parameter vector
+- `results.txt` — seed, safety_flag, test_flag, verdict
+
+> **Note:** Safety and test splits use ground-truth sensitive attributes (clean labels assumed).
 
 ---
 

@@ -209,7 +209,8 @@ if __name__ == "__main__":
     }
 
     # --- CMA-ES loop placeholder ---
-    cma_opts = {'seed': SEED, 'maxiter': MAXITER, 'verbose': 1}
+    # cma_opts = {'seed': SEED, 'maxiter': MAXITER, 'verbose': 1}
+    cma_opts = {'seed': SEED, 'maxiter': MAXITER, 'verbose': 1, 'tolfun': 0, 'tolx': 0}
     if POPSIZE is not None:
         cma_opts['popsize'] = POPSIZE
 
