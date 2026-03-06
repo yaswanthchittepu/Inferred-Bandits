@@ -155,7 +155,7 @@ def inferred_bound_barrier(is_reward, is_action, pi_a, sensitive_mask, inferred_
     p2_grp1 = (1-p1_grp1)*M_inv[0,0] # Coefficient for E[X|S'=1, inferred]
     p3_grp1 = (1-p1_grp1)*M_inv[0,1] # Coefficient for E[X|S'=0, inferred]
 
-    K1 = stats.t.ppf(1 - (constraint_kwargs['fail_prob']/4.0), constraint_kwargs['safety_data_grp_2_size']-1)/math.sqrt(constraint_kwargs['safety_data_grp_2_size'])
+    K1 = stats.t.ppf(1 - (constraint_kwargs['fail_prob']/4.0), constraint_kwargs['safety_data_grp_1_size']-1)/math.sqrt(constraint_kwargs['safety_data_grp_2_size'])
     lcb_p1_grp1 = p1_grp1*(group_1_is_metric_ground.mean() - K1*group_1_is_metric_ground.std(ddof=1))
     ucb_p1_grp1 = p1_grp1*(group_1_is_metric_ground.mean() + K1*group_1_is_metric_ground.std(ddof=1))
     lcb_p1_grp1 += (p2_grp1*group_1_is_metric_inferred.mean()) + (p3_grp1*group_2_is_metric_inferred.mean())

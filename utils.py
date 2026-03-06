@@ -469,6 +469,16 @@ def bound_prop_ucb_constraint_yes_safety(
     group_2_probs_a_ground = group_2_probs_a[~inferred_mask]
     group_2_probs_a_inferred = group_2_probs_a[inferred_mask]
 
+    group_1_is_metric_ground_mean, group_1_is_metric_ground_std = group_1_is_metric_ground.mean(), group_1_is_metric_ground.std(correction=1)
+    group_1_is_metric_inferred_mean, group_1_is_metric_inferred_std = group_1_is_metric_inferred.mean(), group_1_is_metric_inferred.std(correction=1)
+    group_2_is_metric_ground_mean, group_2_is_metric_ground_std = group_2_is_metric_ground.mean(), group_2_is_metric_ground.std(correction=1)
+    group_2_is_metric_inferred_mean, group_2_is_metric_inferred_std = group_2_is_metric_inferred.mean(), group_2_is_metric_inferred.std(correction=1)
+
+    group_1_norm_is_metric_ground = (group_1_is_metric_ground-group_1_is_metric_ground_mean)/(group_1_is_metric_ground_std + 1e-8)
+    group_1_norm_is_metric_inferred = (group_1_is_metric_inferred-group_1_is_metric_inferred_mean)/(group_1_is_metric_inferred_std + 1e-8)
+    group_2_norm_is_metric_ground = (group_2_is_metric_ground-group_2_is_metric_ground_mean)/(group_2_is_metric_ground_std + 1e-8)
+    group_2_norm_is_metric_inferred = (group_2_is_metric_inferred-group_2_is_metric_inferred_mean)/(group_2_is_metric_inferred_std + 1e-8)
+
     # Compute E[X | S=1]
     # Coefficient for E[X|S=1, ground]
     p1_grp1 = (constraint_kwargs['ground_truth_train_data_size']/(constraint_kwargs['ground_truth_train_data_size'] + constraint_kwargs['inferred_train_data_size']))
@@ -481,11 +491,64 @@ def bound_prop_ucb_constraint_yes_safety(
     
     group_1_expectation_total = group_1_expectation_term_1 + group_1_expectation_term_2 + group_1_expectation_term_3
     
-    group_1_is_metric_ground_mean, group_1_is_metric_ground_std = group_1_is_metric_ground.mean(), group_1_is_metric_ground.std(correction=1)
-
     # Stdev Term for E[X|S=1, ground]
-    group_1_norm_is_metric_ground = (group_1_is_metric_ground - group_1_is_metric_ground_mean) / (group_1_is_metric_ground_std + 1e-8)
-    K1 = stats.t.ppf(1 - (constraint_kwargs['fail_prob']/8.0), constraint_kwargs['safety_data_grp_1_size']-1)/math.sqrt(constraint_kwargs['safety_data_grp_1_size'])
-    group_1_stdev_term_ground = p1_grp1*K1*torch.mean(group_1_norm_is_metric_ground * group_1_is_metric_ground * torch.log(group_1_probs_a_ground + 1e-8))
-    return None
+    K1_g1 = stats.t.ppf(1 - (constraint_kwargs['fail_prob']/24.0), constraint_kwargs['n_safety_grp1_ground']-1)/math.sqrt(constraint_kwargs['n_safety_grp1_ground'])
+    group_1_stdev_term_1 = p1_grp1*K1_g1*torch.mean(group_1_norm_is_metric_ground * group_1_is_metric_ground * torch.log(group_1_probs_a_ground + 1e-8))
+    K2_g1 = stats.t.ppf(1 - (constraint_kwargs['fail_prob']/24.0), constraint_kwargs['n_safety_grp1_inferred']-1)/math.sqrt(constraint_kwargs['n_safety_grp1_inferred'])
+    group_1_stdev_term_2 = p2_grp1*K2_g1*torch.mean(group_1_norm_is_metric_inferred * group_1_is_metric_inferred * torch.log(group_1_probs_a_inferred + 1e-8))
+    K3_g1 = stats.t.ppf(1 - (constraint_kwargs['fail_prob']/24.0), constraint_kwargs['n_safety_grp2_inferred']-1)/math.sqrt(constraint_kwargs['n_safety_grp2_inferred'])
+    group_1_stdev_term_3 = p3_grp1*K3_g1*torch.mean(group_2_norm_is_metric_inferred * group_2_is_metric_inferred * torch.log(group_2_probs_a_inferred + 1e-8))
+    
+    group_1_stdev_total = group_1_stdev_term_1 + group_1_stdev_term_2 + group_1_stdev_term_3
+    
+    # COmpute E[X | S=0]
+    # Coefficient for E[X|S=0, ground]
+    p1_grp2 = (constraint_kwargs['ground_truth_train_data_size']/(constraint_kwargs['ground_truth_train_data_size'] + constraint_kwargs['inferred_train_data_size']))
+    p2_grp2 = (1-p1_grp2)*M_inv[1,0] # Coefficient for E[X|S'=1, inferred]
+    p3_grp2 = (1-p1_grp2)*M_inv[1,1] # Coefficient for E[X|S'=0, inferred]
+
+    group_2_expectation_term_1 = p1_grp2*torch.mean(group_2_is_metric_ground * torch.log(group_2_probs_a_ground + 1e-8))
+    group_2_expectation_term_2 = p2_grp2*torch.mean(group_1_is_metric_inferred * torch.log(group_1_probs_a_inferred + 1e-8))
+    group_2_expectation_term_3 = p3_grp2*torch.mean(group_2_is_metric_inferred * torch.log(group_2_probs_a_inferred + 1e-8))
+
+    group_2_expectation_total = group_2_expectation_term_1 + group_2_expectation_term_2 + group_2_expectation_term_3
+
+    # Stdev term for E[X|S=0,ground]
+    K1_g2 = stats.t.ppf(1 - (constraint_kwargs['fail_prob']/24.0), constraint_kwargs['n_safety_grp2_ground']-1)/math.sqrt(constraint_kwargs['n_safety_grp2_ground'])
+    group_2_stdev_term_1 = p1_grp2*K1_g2*torch.mean(group_2_norm_is_metric_ground * group_2_is_metric_ground * torch.log(group_2_probs_a_ground + 1e-8))
+    K2_g2 = stats.t.ppf(1 - (constraint_kwargs['fail_prob']/24.0), constraint_kwargs['n_safety_grp1_inferred']-1)/math.sqrt(constraint_kwargs['n_safety_grp1_inferred'])
+    group_2_stdev_term_2 = p2_grp2*K2_g2*torch.mean(group_1_norm_is_metric_inferred * group_1_is_metric_inferred * torch.log(group_1_probs_a_inferred + 1e-8))
+    K3_g2 = stats.t.ppf(1 - (constraint_kwargs['fail_prob']/24.0), constraint_kwargs['n_safety_grp2_inferred']-1)/math.sqrt(constraint_kwargs['n_safety_grp2_inferred'])
+    group_2_stdev_term_3 = p3_grp2*K3_g2*torch.mean(group_2_norm_is_metric_inferred * group_2_is_metric_inferred * torch.log(group_2_probs_a_inferred + 1e-8))
+    
+    group_2_stdev_total = group_2_stdev_term_1 + group_2_stdev_term_2 + group_2_stdev_term_3 
+    
+    # Total Expectation Term
+    expectation_combined = (torch.exp(log_lambda1).detach().item()-torch.exp(log_lambda2).detach().item()) * (group_1_expectation_total - group_2_expectation_total)
+
+    # Total Stdev Term
+    stdev_combined = (torch.exp(log_lambda1).detach().item()+torch.exp(log_lambda2).detach().item()) * ((group_1_stdev_total) + (group_2_stdev_total))
+
+    # Total Constraint term
+    constraint_term = expectation_combined + stdev_combined
+
+    with torch.no_grad():
+        mean_terms_g1 = (p1_grp1*group_1_is_metric_ground.mean()) + (p2_grp1*group_1_is_metric_inferred.mean()) + (p3_grp1*group_2_is_metric_inferred.mean())
+        mean_terms_g2 = (p1_grp2*group_2_is_metric_ground.mean()) + (p2_grp2*group_1_is_metric_inferred.mean()) + (p3_grp2*group_2_is_metric_inferred.mean())
+        std_terms_g1 = (p1_grp1*K1_g1*group_1_is_metric_ground.std(correction=1)) + (p2_grp1*K2_g1*group_1_is_metric_inferred.std(correction=1)) + (p3_grp1*K3_g1*group_2_is_metric_inferred.std(correction=1))
+        std_terms_g2 = (p1_grp2*K1_g2*group_2_is_metric_ground.std(correction=1)) + (p2_grp2*K2_g2*group_1_is_metric_inferred.std(correction=1)) + (p3_grp2*K3_g2*group_2_is_metric_inferred.std(correction=1))
+        ucb_g1_v_g2 = mean_terms_g1 - mean_terms_g2 + std_terms_g1 + std_terms_g2
+        ucb_g2_v_g1 = mean_terms_g2 - mean_terms_g1 + std_terms_g1 + std_terms_g2
+
+    metrics = {
+        'ucb_g1_v_g2': ucb_g1_v_g2.detach(),
+        'ucb_g2_v_g1': ucb_g2_v_g1.detach(),
+        'group_1_is_metric_mean': group_1_is_metric.mean().detach(),
+        'group_2_is_metric_mean': group_2_is_metric.mean().detach(),
+        'tinv_k1': K1,
+        'tinv_k2': K2
+
+    }
+    return constraint_term, metrics
+
 
