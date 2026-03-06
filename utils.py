@@ -367,7 +367,7 @@ def bound_prop_ucb_constraint_no_safety(is_reward, is_action, output_probs_a, se
     # Stdev Term for E[X|S=1, ground]
     group_1_norm_is_metric_ground = (group_1_is_metric_ground - group_1_is_metric_ground_mean) / (group_1_is_metric_ground_std + 1e-8)
     K1 = stats.t.ppf(1 - (constraint_kwargs['fail_prob']/8.0), constraint_kwargs['safety_data_grp_1_size']-1)/math.sqrt(constraint_kwargs['safety_data_grp_1_size'])
-    group_1_stdev_term_ground = K1*torch.mean(group_1_norm_is_metric_ground * group_1_is_metric_ground * torch.log(group_1_probs_a_ground + 1e-8))
+    group_1_stdev_term_ground = p1_grp1*K1*torch.mean(group_1_norm_is_metric_ground * group_1_is_metric_ground * torch.log(group_1_probs_a_ground + 1e-8))
 
     
     # COmpute E[X | S=0]
@@ -387,7 +387,7 @@ def bound_prop_ucb_constraint_no_safety(is_reward, is_action, output_probs_a, se
     # Stdev term for E[X|S=0,ground]
     group_2_norm_is_metric_ground = (group_2_is_metric_ground - group_2_is_metric_ground_mean) / (group_2_is_metric_ground_std + 1e-8)
     K2 = stats.t.ppf(1 - (constraint_kwargs['fail_prob']/8.0), constraint_kwargs['safety_data_grp_2_size']-1)/math.sqrt(constraint_kwargs['safety_data_grp_2_size'])
-    group_2_stdev_term_ground = K2*torch.mean(group_2_norm_is_metric_ground * group_2_is_metric_ground * torch.log(group_2_probs_a_ground + 1e-8))
+    group_2_stdev_term_ground = p1_grp2*K2*torch.mean(group_2_norm_is_metric_ground * group_2_is_metric_ground * torch.log(group_2_probs_a_ground + 1e-8))
     
     # Total Expectation Term
     expectation_combined = (torch.exp(log_lambda1).detach().item()-torch.exp(log_lambda2).detach().item()) * (group_1_expectation_total - group_2_expectation_total)
@@ -415,5 +415,77 @@ def bound_prop_ucb_constraint_no_safety(is_reward, is_action, output_probs_a, se
     }
     return constraint_term, metrics
 
+def bound_prop_ucb_constraint_yes_safety(
+    is_reward, is_action, output_probs_a, sensitive_mask, inferred_mask,
+    log_lambda1, log_lambda2, constraint_kwargs
+):
+    
+    # Constraint Terms
+    if(constraint_kwargs['disparity_type'] == 'reward'):
+        group_1_is_metric = is_reward[sensitive_mask]
+        group_2_is_metric = is_reward[~sensitive_mask]
+    elif(constraint_kwargs['disparity_type'] == 'action'):
+        group_1_is_metric = is_action[sensitive_mask]
+        group_2_is_metric = is_action[~sensitive_mask]
+    else:
+        raise ValueError(f"Invalid disparity type provided: {constraint_kwargs['disparity_type']}")
 
+    group_1_probs_a = output_probs_a[sensitive_mask]
+    group_2_probs_a = output_probs_a[~sensitive_mask]
+
+    # FPR for 0s, FNR for 1s
+    # Grp 1 corresponds to sensitive attribute = 1
+    # Grp 2 corresponds to sensitive attribute = 0
+
+    prob_grp1 = constraint_kwargs['grp1_cnt_train_data']/(constraint_kwargs['grp1_cnt_train_data'] + constraint_kwargs['grp2_cnt_train_data'])
+    prob_grp2 = 1 - prob_grp1
+
+    # m11 = P(S=1|S'=1) = P(S'=1 | S = 1) P(S=1) / ( P(S'=1 | S = 1) P(S=1) +  P(S'= 1 | S = 0) P(S=0))
+    m11 = ((1-constraint_kwargs['fnr'])*prob_grp1)/(((1-constraint_kwargs['fnr'])*prob_grp1) + ((constraint_kwargs['fpr'])*prob_grp2))
+
+    # m12 = P(S=0|S'=1) = P(S'=1|S=0) P(S=0) / (P(S'=1|S=0) P(S=0) + P(S'=1|S=1) P(S=1))
+    m12 = ((constraint_kwargs['fpr'])*prob_grp2)/(((constraint_kwargs['fpr'])*prob_grp2) + ((1-constraint_kwargs['fnr'])*prob_grp1))
+
+    # m21 = P(S=1 | S'=0) = P(S'=0 | S =1) P(S=1) / (P(S'=0 | S =1) P(S=1) + P(S'=0 | S =0) P(S=0))
+    m21 = ((constraint_kwargs['fnr'])*prob_grp1)/(((constraint_kwargs['fnr'])*prob_grp1) + ((1-constraint_kwargs['fpr'])*prob_grp2))
+
+    # m22 = P(S=0 | S'=0) = P(S'=0 | S = 0) P(S=0) / (P(S'=0 | S = 0) P(S=0) + P(S'=0 | S = 1) P(S=1))
+    m22 = ((1-constraint_kwargs['fpr'])*prob_grp2)/(((1-constraint_kwargs['fpr'])*prob_grp2) + ((constraint_kwargs['fnr'])*prob_grp1))
+    
+    M = np.array([[m11, m12], [m21, m22]])
+    assert np.allclose(M.sum(axis=1), 1.0), f"M rows do not sum to 1: {M.sum(axis=1)}"
+    M_inv = np.linalg.inv(M)
+
+    # mu' = [E[X|S'=1, inferred], E[X|S'=0, inferred]]
+    # mu = [E[X|S=1, inferred], E[X|S=0, inferred]]
+    # mu = M.inv() mu'
+
+    group_1_is_metric_ground = group_1_is_metric[~inferred_mask]
+    group_1_is_metric_inferred = group_1_is_metric[inferred_mask]
+    group_1_probs_a_ground = group_1_probs_a[~inferred_mask]
+    group_1_probs_a_inferred = group_1_probs_a[inferred_mask]
+    group_2_is_metric_ground = group_2_is_metric[~inferred_mask]
+    group_2_is_metric_inferred = group_2_is_metric[inferred_mask]
+    group_2_probs_a_ground = group_2_probs_a[~inferred_mask]
+    group_2_probs_a_inferred = group_2_probs_a[inferred_mask]
+
+    # Compute E[X | S=1]
+    # Coefficient for E[X|S=1, ground]
+    p1_grp1 = (constraint_kwargs['ground_truth_train_data_size']/(constraint_kwargs['ground_truth_train_data_size'] + constraint_kwargs['inferred_train_data_size']))
+    p2_grp1 = (1-p1_grp1)*M_inv[0,0] # Coefficient for E[X|S'=1, inferred]
+    p3_grp1 = (1-p1_grp1)*M_inv[0,1] # Coefficient for E[X|S'=0, inferred]
+
+    group_1_expectation_term_1 = p1_grp1*torch.mean(group_1_is_metric_ground * torch.log(group_1_probs_a_ground + 1e-8))
+    group_1_expectation_term_2 = p2_grp1*torch.mean(group_1_is_metric_inferred * torch.log(group_1_probs_a_inferred + 1e-8))
+    group_1_expectation_term_3 = p3_grp1*torch.mean(group_2_is_metric_inferred * torch.log(group_2_probs_a_inferred + 1e-8))
+    
+    group_1_expectation_total = group_1_expectation_term_1 + group_1_expectation_term_2 + group_1_expectation_term_3
+    
+    group_1_is_metric_ground_mean, group_1_is_metric_ground_std = group_1_is_metric_ground.mean(), group_1_is_metric_ground.std(correction=1)
+
+    # Stdev Term for E[X|S=1, ground]
+    group_1_norm_is_metric_ground = (group_1_is_metric_ground - group_1_is_metric_ground_mean) / (group_1_is_metric_ground_std + 1e-8)
+    K1 = stats.t.ppf(1 - (constraint_kwargs['fail_prob']/8.0), constraint_kwargs['safety_data_grp_1_size']-1)/math.sqrt(constraint_kwargs['safety_data_grp_1_size'])
+    group_1_stdev_term_ground = p1_grp1*K1*torch.mean(group_1_norm_is_metric_ground * group_1_is_metric_ground * torch.log(group_1_probs_a_ground + 1e-8))
+    return None
 
