@@ -19,13 +19,15 @@ pip install -r requirements.txt
 ## File Structure
 
 ```
-optimize.py             # Main training script (gradient-based)
-optimize_cma.py         # CMA-ES training script (derivative-free)
-policy.py               # PolicyNet definition
-utils.py                # Constraint functions, safety test, test evaluation
-configs/default.yaml    # Default hyperparameters for optimize.py
-configs/default_cma.yaml # Default hyperparameters for optimize_cma.py
-bandit_data_pipeline.py # Data preprocessing and dataset creation
+optimize.py                          # Main training script (gradient-based)
+optimize_cma.py                      # CMA-ES training script (derivative-free)
+inferred-optimize-no-safe.py         # Gradient-based script with inferred (noisy) sensitive attributes
+policy.py                            # PolicyNet definition
+utils.py                             # Constraint functions, safety test, test evaluation
+configs/default.yaml                 # Default hyperparameters for optimize.py
+configs/default_cma.yaml             # Default hyperparameters for optimize_cma.py
+configs/default_inferred_no_safe.yaml # Default hyperparameters for inferred-optimize-no-safe.py
+bandit_data_pipeline.py              # Data preprocessing and dataset creation
 ```
 
 ---
@@ -145,6 +147,8 @@ v = (s1²/n1 + s2²/n2)² / [(s1²/n1)²/(n1-1) + (s2²/n2)²/(n2-1)]
 ucb_g1_v_g2 = mean_g1 - mean_g2 + t(1-delta, v) * sqrt(s1²/n1 + s2²/n2)
 ```
 
+**`bound_prop_ucb_constraint_no_safety`** is used exclusively by `inferred-optimize-no-safe.py`. It accounts for the fact that some training samples have inferred (noisy) sensitive attributes. Instead of a t-test UCB, it uses bound propagation through a confusion matrix `M` to correct for classifier errors. See the [Inferred Sensitive Attributes](#inferred-sensitive-attributes-inferred-optimize-no-safepy) section for details.
+
 ---
 
 ## Safety Test and Test Evaluation (`utils.py`)
@@ -178,6 +182,95 @@ python optimize.py --config configs/default.yaml --mode seldonian --seed 0
 | `fixed_lambda` | Penalty weight for `fixed_lambda` mode |
 | `dual_opt_lr` | Learning rate for dual variable optimizer |
 | `log_lambda_max` | Clamp on log-space dual variables |
+
+---
+
+## Inferred Sensitive Attributes (`inferred-optimize-no-safe.py`)
+
+This script handles the realistic setting where the sensitive attribute is **not fully observed** for all training samples. A portion of training data uses a **classifier-inferred** (and therefore noisy) sensitive attribute, while the rest has ground-truth labels.
+
+### Partition Split
+
+At startup, the training data is split into two disjoint partitions:
+
+- **Ground-truth partition** (`1 - inferred_proportion`): sensitive attribute is accurate.
+- **Inferred partition** (`inferred_proportion`): sensitive attribute is corrupted by the classifier.
+
+```python
+n_inferred   = int(n_train * INFERRED_PROPORTION)
+inferred_idx = np.random.choice(n_train, size=n_inferred, replace=False)
+```
+
+### Asymmetric Label Noise (FPR / FNR)
+
+The inferred partition's sensitive attribute is corrupted using asymmetric error rates:
+
+| Rate | Meaning |
+|---|---|
+| `fpr` (α) | P(inferred=1 \| true=0) — false positive rate |
+| `fnr` (β) | P(inferred=0 \| true=1) — false negative rate |
+
+When `fpr == fnr`, this reduces to symmetric noise. Flipping is applied independently per sample:
+
+```python
+flip_probs = np.where(inferred_orig == 0, FPR, FNR)
+flip_mask  = np.random.random(n_inferred) < flip_probs
+sensitive_noisy[inferred_idx[flip_mask]] ^= 1
+```
+
+### Group Size Counting
+
+Group sizes (used in the UCB constraint) are computed **from the ground-truth partition only**, since inferred labels are unreliable:
+
+```python
+gt_sensitive     = sensitive_noisy[~is_inferred]
+train_grp_1_size = int(gt_sensitive.sum())       # sens=1
+train_grp_2_size = int((~is_inferred).sum()) - train_grp_1_size  # sens=0
+```
+
+### Constraint: Bound Propagation via Confusion Matrix
+
+`bound_prop_ucb_constraint_no_safety` (from `utils.py`) corrects for classifier noise by propagating bounds through the confusion matrix **M**, where:
+
+```
+M[s, s'] = P(S=s | S'=s')    (posterior prob using Bayes rule with FPR, FNR, group priors)
+```
+
+Row sums of M must equal 1 (asserted at runtime). The inverse `M_inv` is used to "undo" the label noise and obtain corrected group-level estimates.
+
+The function takes an extra `inferred_mask` tensor (shape `(B,)`, bool) indicating which batch samples are from the inferred partition.
+
+### Training Modes
+
+Only two modes are supported:
+
+| Mode | Description |
+|---|---|
+| `naive` | Unconstrained IS-reward maximization |
+| `seldonian` | Lagrangian fairness with bound-propagation UCB constraint |
+
+### Usage
+
+```bash
+python inferred-optimize-no-safe.py --config configs/default_inferred_no_safe.yaml --mode seldonian --seed 0
+```
+
+| Parameter | Description |
+|---|---|
+| `inferred_proportion` | Fraction of training data using inferred (noisy) sensitive attr |
+| `fpr` | False positive rate of the sensitive attribute classifier (α) |
+| `fnr` | False negative rate of the sensitive attribute classifier (β) |
+
+All other parameters (`mode`, `epsilon`, `fail_prob`, etc.) are identical to `optimize.py`.
+
+### Outputs
+
+Saved to `{output_dir}/{dataset}/{sensitive_attr}/{constraint_trunc}/{behavior_policy}/`:
+
+- `policy.pt` — trained policy weights
+- `results.txt` — seed, safety_flag, test_flag, verdict
+
+> **Note:** Safety test and test evaluation still use the ground-truth sensitive attribute (safety and test splits are assumed to have clean labels).
 
 ---
 
